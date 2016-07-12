@@ -8,10 +8,13 @@ from bs4 import BeautifulSoup
 
 from models import Item
 
+from pymongo import  MongoClient
+client = MongoClient()
+db = client.shopping_clawer
+smzdm = db.smzdm_clawer
 
 def send_email(item):
     pass
-
 
 
 while 1:
