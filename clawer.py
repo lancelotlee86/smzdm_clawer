@@ -1,22 +1,20 @@
 # encoding=utf8
 # !/usr/bin/python3
 
-import asyncio
-from time import sleep
 import datetime
-
 import requests
 from bs4 import BeautifulSoup
-
-from models import Item
-
 import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
-
 import threading
-
 from pymongo import  MongoClient
+from models import Item
+try:
+    import config_instance
+except ImportError:
+    import config
+
 
 # setup mongodb
 client = MongoClient()
@@ -25,13 +23,18 @@ smzdm = db.smzdm_clawer
 
 
 def send_email(items_to_email):
+    """
+    一个辅助方法，接收一个Item对象的列表，并提取我们需要的数据，格式化后发送邮件出去
+    :param items_to_email: 装着Item对象的列表
+    :return: None
+    """
     print("sending email..." + str(datetime.datetime.now()))
-    sender = 'lishenzhi@yeah.net'
-    receiver = '823990768@qq.com'
-    subject = 'python email test'
-    smtpserver = 'smtp.yeah.net'
-    username = 'lishenzhi@yeah.net'
-    password = 'lishenzhi1214'
+    sender = config_instance.SENDER
+    receiver = config_instance.RECEIVER
+    subject = config_instance.SUBJECT
+    smtpserver = config_instance.SMTPSERVER
+    username = config_instance.USERNAME
+    password = config_instance.PASSWORD
 
     body = ''
     count = 1
@@ -46,9 +49,8 @@ def send_email(items_to_email):
     msg['To'] = receiver
 
     smtp = smtplib.SMTP()
-    smtp.connect('smtp.yeah.net')
+    smtp.connect(smtpserver)
     smtp.login(username, password)
-    #smtp.send_message(msg, from_addr=sender, to_addrs=receiver)
     smtp.sendmail(sender, [receiver], msg.as_string())
     smtp.quit()
 
@@ -80,24 +82,43 @@ class SmzdmClawer(Clawer):
         """
         打开给定或默认的URL，用Requests库请求
         :param url: str
-        :return: None
+        :return: None或requests对象
         """
         if url:
             self.url = url
-        r = requests.get(url=self.url, headers=self.headers, timeout=2)
+        # 试着访问，如果超时或者别的原因，则返回空
+        try:
+            r = requests.get(url=self.url, headers=self.headers, timeout=2)
+            if r.status_code != 200:
+                return None
+        except:
+            return None
+
         print('request sent')
         r.encoding = 'utf-8'
         return r
 
-    def parase(self, response):
+    @staticmethod
+    def close_response(response):
+        response.close()
+
+    @staticmethod
+    def parase(response):
         """
-        清理HTML，用BeautifulSoup库解析
-        :return:
+        接收requests库请求后的响应对象，清理HTML，用BeautifulSoup库解析
+        :param response: requests库的响应对象
+        :return: beautifulsoup解析html后的对象
         """
         soup = BeautifulSoup(response.text.replace("\r", "").replace("\n", "").replace("\t", ""))
         return soup
 
-    def get_items(self, soup):
+    @staticmethod
+    def get_items(soup):
+        """
+        接收 parase() 方法传递的 beautifulsoup 对象，得到包含着Item对象的列表
+        :param soup: beautifulsoup 对象
+        :return: 包含着Item对象的列表
+        """
         ul_container = soup.select('.leftWrap.discovery_list')[0]  # 获取包含着所有物品的那个<ul>标签
         all_items = ul_container.select('li')
         items = []      # 一个装着Item对象的列表
@@ -112,11 +133,12 @@ class SmzdmClawer(Clawer):
             items.append(this_item)     # 添加当前的Item对象到items列表
         return items
 
-    def exist(self, item):
+    @staticmethod
+    def exist(item):
         """
         检查给定的item是否存在在数据库中
-        :param item:
-        :return:
+        :param item: Item对象
+        :return: Boolean
         """
         if smzdm.find_one({'articleid': item.articleid}):
             return True     # 如果该记录已存在
@@ -125,6 +147,14 @@ class SmzdmClawer(Clawer):
 
 
 def main():
+    """
+    main()做一下几个事，
+    1. 2秒后开启新的Threading运行main()---->>
+    2. 访问页面并用beautifulsoup库解析，得到这一时间点的所有页面上的items---->>
+    3. 遍历items，不在数据库中的，添加到数据库，并且添加到items_to_mail[]---->>
+    4. 调用send_email()将items_to_mail[]发送出去
+    :return: None
+    """
     threading.Timer(2, main).start()    # 每次开始main函数时，新开一个递归的线程，以此实现每2秒请求一次
     now = datetime.datetime.now()
     print('starting a new threading: ' + str(threading.current_thread().ident) + ' @ ' + str(now))
@@ -133,8 +163,12 @@ def main():
     # 下面4行做的工作：访问页面-->解析页面-->得到item对象的列表
     smzdm_clawer = SmzdmClawer()
     response_page = smzdm_clawer.open_url(url="http://faxian.smzdm.com/")
+    if not response_page:   # 如果返回的页面是None，则跳过这一轮请求
+        print('页面请求失败...')
+        return
     parsed_page = smzdm_clawer.parase(response_page)
     items_in_smzdm = smzdm_clawer.get_items(parsed_page)  # 得到了所有的item对象，在一个列表item_in_smzdm中
+    smzdm_clawer.close_response(response_page)
 
     # 检查页面中每一条记录是否已存在，如不存在，说明是新的记录，通过邮件发送并存储在数据库中
     items_to_email = []
@@ -146,9 +180,10 @@ def main():
             smzdm.insert_one(item.to_dict())  # 将这条记录存放在数据库中
     if items_to_email:  # 将这次请求找到的items发送出去
         send_email(items_to_email)
-    response_page.close()  # 这里的response_page是前面的请求对象，需要调用close()方法关闭
 
     print('after process threading' + str(threading.current_thread().ident))
+
+    return
 
 if __name__ == '__main__':
     main()
